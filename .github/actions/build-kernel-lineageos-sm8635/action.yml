@@ -1,0 +1,416 @@
+name: "Build Kernel – LineageOS Xiaomi SM8635 (KernelSU-Next + SUSFS)"
+description: >
+  Builds the LineageOS vendor kernel for Xiaomi SM8635 (Snapdragon 8s Gen 3)
+  devices with KernelSU-Next (manual hooks) and SUSFS. This replaces the
+  original GKI android14-6.1 action from WildKernels/GKI_KernelSU_SUSFS.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IMPORTANT: Things you MUST verify / customise before using
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. KERNEL_DEFCONFIG – run  `ls arch/arm64/configs/`  inside the kernel repo
+#    to find the correct name.  For SM8635 the most common values are:
+#      vendor/anorak_GKI_defconfig     (Qualcomm GKI-style)
+#      gki_defconfig                   (plain GKI)
+#      <device-codename>_defconfig     (device-specific, check your device)
+#
+# 2. IMAGE_NAME – Most 6.1 kernels produce "Image" (no .gz).
+#    Check  arch/arm64/boot/  after a local test build.
+#
+# 3. ANYKERNEL_REPO / ANYKERNEL_BRANCH – adjust to your preferred AnyKernel3
+#    fork that is configured for your target device(s).
+#
+# 4. DTB path – SM8635 DTBs live under one of:
+#      out/arch/arm64/boot/dts/vendor/qcom/
+#      out/arch/arm64/boot/dts/qcom/
+#    The step below tries both; confirm after a real build.
+# ──────────────────────────────────────────────────────────────────────────────
+
+inputs:
+  # ── Kernel source ────────────────────────────────────────────────────────
+  KERNEL_SOURCE:
+    description: "LineageOS SM8635 kernel git URL"
+    required: false
+    default: "https://github.com/LineageOS/android_kernel_xiaomi_sm8635"
+
+  KERNEL_BRANCH:
+    description: "Kernel branch to checkout"
+    required: false
+    default: "lineage-23.2"
+
+  KERNEL_DEFCONFIG:
+    description: >
+      Defconfig to use. Check arch/arm64/configs/ in the kernel tree.
+      Most common for SM8635: vendor/anorak_GKI_defconfig
+    required: false
+    default: "vendor/peridot_GKI.config"
+
+  IMAGE_NAME:
+    description: "Output image name: Image or Image.gz"
+    required: false
+    default: "Image"
+
+  # ── KernelSU / SUSFS ─────────────────────────────────────────────────────
+  KSUTYPE:
+    description: "'next' for KernelSU-Next  |  'wild' for Wild KSU + SUSFS"
+    required: false
+    default: "next"
+
+  KSUN_TAG:
+    description: >
+      KernelSU-Next tag or branch (only used when KSUTYPE=next).
+      Use 'main' for latest, or a tag like 'v1.0.5'.
+    required: false
+    default: "main"
+
+  SUSFS_BRANCH:
+    description: >
+      susfs4ksu branch to use. Must match kernel major.minor.
+      For LineageOS SM8635 (kernel 6.1) use 'kernel-6.1'.
+    required: false
+    default: "kernel-6.1"
+
+  SUSFS_VER:
+    description: "SUSFS version string used in artifact naming only"
+    required: false
+    default: "v2.1.0"
+
+  # ── Toolchain ─────────────────────────────────────────────────────────────
+  # Kernel 6.1 requires Clang 18 (r522817c).
+  # clang-r487747c (Clang 17) is too old and will fail.
+  CLANG_SOURCE:
+    description: >
+      GitHub URL of prebuilt Clang to clone (without .git).
+      For kernel 6.1 use clang-r522817c (Clang 18).
+    required: false
+    default: "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r522817c"
+
+  CLANG_REPO_BRANCH:
+    description: "Branch of the CLANG_SOURCE repo to clone"
+    required: false
+    default: "lineage-23.0"
+
+  # ── AnyKernel3 ───────────────────────────────────────────────────────────
+  ANYKERNEL_REPO:
+    description: "AnyKernel3 repository URL"
+    required: false
+    default: "https://github.com/osm0sis/AnyKernel3"
+
+  ANYKERNEL_BRANCH:
+    description: "AnyKernel3 branch"
+    required: false
+    default: "master"
+
+# ──────────────────────────────────────────────────────────────────────────────
+runs:
+  using: "composite"
+  steps:
+
+    # ── 0. Install host build dependencies ───────────────────────────────────
+    - name: "Install build dependencies"
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+          bc bison build-essential curl flex git \
+          libelf-dev libssl-dev libncurses-dev \
+          python3 zip unzip binutils-aarch64-linux-gnu \
+          lz4 lzop
+
+    # ── 1. Clone the LineageOS SM8635 kernel ─────────────────────────────────
+    - name: "Clone LineageOS SM8635 kernel source"
+      shell: bash
+      run: |
+        echo "═══════════════════════════════════════"
+        echo " Kernel : ${{ inputs.KERNEL_SOURCE }}"
+        echo " Branch : ${{ inputs.KERNEL_BRANCH }}"
+        echo "═══════════════════════════════════════"
+
+        git clone --depth=1 \
+          --branch "${{ inputs.KERNEL_BRANCH }}" \
+          "${{ inputs.KERNEL_SOURCE }}" \
+          kernel_sm8635
+
+        echo "KERNEL_DIR=$(pwd)/kernel_sm8635" >> "$GITHUB_ENV"
+
+        # Print kernel version for reference (should show 6, 1, ...)
+        echo "Kernel Makefile version info:"
+        head -5 kernel_sm8635/Makefile
+
+    # ── 2. Download / clone the Clang toolchain ───────────────────────────────
+    # Clang 18 (r522817c) is required for kernel 6.1.
+    # Clang 17 or older will produce build errors.
+    - name: "Setup Clang toolchain (Clang 18 for kernel 6.1)"
+      shell: bash
+      run: |
+        echo "═══════════════════════════════════════"
+        echo " Clang : ${{ inputs.CLANG_SOURCE }}"
+        echo " Branch: ${{ inputs.CLANG_REPO_BRANCH }}"
+        echo "═══════════════════════════════════════"
+
+        git clone --depth=1 \
+          --branch "${{ inputs.CLANG_REPO_BRANCH }}" \
+          "${{ inputs.CLANG_SOURCE }}" \
+          clang_toolchain
+
+        # Verify clang is usable
+        ./clang_toolchain/bin/clang --version || {
+          echo "ERROR: clang binary not found or not executable."
+          ls clang_toolchain/bin/ | head -20
+          exit 1
+        }
+
+        echo "CLANG_DIR=$(pwd)/clang_toolchain" >> "$GITHUB_ENV"
+
+    # ── 3. Integrate KernelSU ────────────────────────────────────────────────
+    # For a vendor-modified 6.1 kernel (LineageOS), manual hooks are used
+    # because the kernel may not have the exact GKI symbol table that
+    # automatic hooks depend on.
+    - name: "Integrate KernelSU"
+      shell: bash
+      run: |
+        cd "$KERNEL_DIR"
+
+        echo "═══════════════════════════════════════"
+        echo " KSU type : ${{ inputs.KSUTYPE }}"
+        echo "═══════════════════════════════════════"
+
+        if [ "${{ inputs.KSUTYPE }}" = "wild" ]; then
+          # Wild KSU includes SUSFS by default
+          echo "→ Installing Wild KSU + SUSFS..."
+          curl -LSs \
+            "https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh" \
+            | bash -s wild-susfs
+          echo "SKIP_SUSFS=true" >> "$GITHUB_ENV"
+        else
+          echo "→ Installing KernelSU-Next @ ${{ inputs.KSUN_TAG }}..."
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ inputs.KSUN_TAG }}/kernel/setup.sh" \
+            | bash -s "${{ inputs.KSUN_TAG }}"
+          echo "SKIP_SUSFS=false" >> "$GITHUB_ENV"
+        fi
+
+        echo "KernelSU driver directory:"
+        ls drivers/kernelsu/ 2>/dev/null || \
+        ls KernelSU-Next/      2>/dev/null || \
+        echo "WARNING: KSU directory not found — check setup.sh output above"
+
+    # ── 4. Apply SUSFS patches (kernel-6.1) ──────────────────────────────────
+    - name: "Apply SUSFS patches (kernel-6.1)"
+      shell: bash
+      run: |
+        if [ "${SKIP_SUSFS:-false}" = "true" ]; then
+          echo "Wild KSU already includes SUSFS — skipping."
+          exit 0
+        fi
+
+        echo "═══════════════════════════════════════"
+        echo " SUSFS branch : ${{ inputs.SUSFS_BRANCH }}"
+        echo "═══════════════════════════════════════"
+
+        # Clone susfs4ksu for kernel 6.1
+        git clone --depth=1 \
+          https://gitlab.com/simonpunk/susfs4ksu.git \
+          --branch "${{ inputs.SUSFS_BRANCH }}" \
+          /tmp/susfs4ksu
+
+        echo "Available susfs patches:"
+        find /tmp/susfs4ksu/kernel_patches -name "*.patch" | sort
+
+        cd "$KERNEL_DIR"
+
+        # ── 4a. Main kernel SUSFS patch ───────────────────────────────────────
+        # Try the expected 6.1 patch names in order
+        for PATCH in \
+          "/tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch" \
+          "/tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-6.1.patch" \
+          "$(find /tmp/susfs4ksu/kernel_patches -maxdepth 1 -name '50_*.patch' | head -1)"; do
+          if [ -f "$PATCH" ]; then
+            echo "Applying kernel SUSFS patch: $(basename "$PATCH")"
+            patch -p1 --fuzz=3 < "$PATCH" && echo "✓ Applied OK" && break || {
+              echo "WARNING: patch had rejections — continuing (*.rej files left on disk)"
+              cat *.rej 2>/dev/null | head -60 || true
+            }
+          fi
+        done
+
+        # ── 4b. KernelSU-side SUSFS integration patch ─────────────────────────
+        KSU_PATCH="$(find /tmp/susfs4ksu/kernel_patches/next -name '*.patch' 2>/dev/null \
+                     | head -1)"
+        if [ -z "$KSU_PATCH" ]; then
+          KSU_PATCH="$(find /tmp/susfs4ksu/kernel_patches -name '10_enable_susfs_for_ksu.patch' \
+                       2>/dev/null | head -1)"
+        fi
+
+        if [ -n "$KSU_PATCH" ] && [ -f "$KSU_PATCH" ]; then
+          echo "Applying KSU-SUSFS integration patch: $(basename "$KSU_PATCH")"
+          # Try inside drivers/kernelsu first, then top-level
+          (cd drivers/kernelsu 2>/dev/null && patch -p3 --fuzz=3 < "$KSU_PATCH") || \
+          patch -p1 --fuzz=3 < "$KSU_PATCH" || \
+          echo "WARNING: KSU-SUSFS patch could not be applied cleanly."
+        fi
+
+    # ── 5. Configure kernel ───────────────────────────────────────────────────
+    - name: "Configure kernel"
+      shell: bash
+      run: |
+        cd "$KERNEL_DIR"
+
+        export PATH="$CLANG_DIR/bin:$PATH"
+
+        # Build arguments — same as what AOSP / LineageOS use for 6.1 kernels
+        BUILD_ARGS=(
+          O=out
+          ARCH=arm64
+          CC=clang
+          LD=ld.lld
+          AR=llvm-ar
+          NM=llvm-nm
+          STRIP=llvm-strip
+          OBJCOPY=llvm-objcopy
+          OBJDUMP=llvm-objdump
+          READELF=llvm-readelf
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          CROSS_COMPILE=aarch64-linux-android-
+          LLVM=1
+          LLVM_IAS=1
+        )
+
+        echo "═══════════════════════════════════════"
+        echo " Defconfig : ${{ inputs.KERNEL_DEFCONFIG }}"
+        echo "═══════════════════════════════════════"
+
+        make "${BUILD_ARGS[@]}" ${{ inputs.KERNEL_DEFCONFIG }}
+
+        # ── Enable KernelSU ───────────────────────────────────────────────────
+        # CONFIG_KSU_MANUAL_HOOK is needed because the LineageOS vendor kernel
+        # is not a pure AOSP GKI image — automatic hooks may fail or misbehave.
+        scripts/config --file out/.config \
+          -e CONFIG_KSU \
+          -e CONFIG_KSU_MANUAL_HOOK
+
+        # ── Enable SUSFS (skip if Wild KSU already set these) ─────────────────
+        if [ "${SKIP_SUSFS:-false}" != "true" ]; then
+          scripts/config --file out/.config \
+            -e CONFIG_KSU_SUSFS \
+            -e CONFIG_KSU_SUSFS_SUS_PATH \
+            -e CONFIG_KSU_SUSFS_SUS_MOUNT \
+            -e CONFIG_KSU_SUSFS_SUS_KSTAT \
+            -e CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            -e CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            -e CONFIG_KSU_SUSFS_ENABLE_LOG \
+            -e CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            -e CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            -e CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+            -e CONFIG_KSU_SUSFS_SUS_SU \
+            -e CONFIG_KSU_SUSFS_SUS_MAP
+        fi
+
+        # Re-run olddefconfig to resolve any new symbols introduced above
+        make "${BUILD_ARGS[@]}" olddefconfig
+
+        echo ""
+        echo "Final KSU/SUSFS config:"
+        grep -E "^CONFIG_KSU" out/.config || echo "(none found – check that SUSFS patch applied OK)"
+
+    # ── 6. Build kernel ───────────────────────────────────────────────────────
+    - name: "Build kernel"
+      shell: bash
+      run: |
+        cd "$KERNEL_DIR"
+
+        export PATH="$CLANG_DIR/bin:$PATH"
+
+        START=$(date +%s)
+        echo "Starting build with $(nproc) threads..."
+
+        make -j$(nproc --all) \
+          O=out \
+          ARCH=arm64 \
+          CC=clang \
+          LD=ld.lld \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          STRIP=llvm-strip \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          READELF=llvm-readelf \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-android- \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          ${{ inputs.IMAGE_NAME }} \
+          dtbs \
+          2>&1 | tee build.log
+
+        END=$(date +%s)
+        echo "Build time: $(( END - START ))s"
+
+        # ── Verify output ─────────────────────────────────────────────────────
+        IMAGE="out/arch/arm64/boot/${{ inputs.IMAGE_NAME }}"
+        if [ -f "$IMAGE" ]; then
+          echo "✓ Kernel image: $(ls -lh "$IMAGE")"
+        else
+          echo ""
+          echo "✗ BUILD FAILED — last 80 lines of log:"
+          tail -80 build.log
+          exit 1
+        fi
+
+    # ── 7. Package AnyKernel3 ZIP ─────────────────────────────────────────────
+    - name: "Package AnyKernel3"
+      shell: bash
+      run: |
+        BUILD_DATE=$(TZ='Asia/Jakarta' date "+%Y%m%d-%H%M")
+
+        # Read kernel release string (e.g. 6.1.75-android14-11-lineage)
+        KERN_REL=$(cat "$KERNEL_DIR/out/include/config/kernel.release" 2>/dev/null \
+                   | tr -d '\n' || echo "6.1-lineage")
+
+        ZIP_NAME="LineageOS-SM8635-${KERN_REL}-KSUN-SUSFS-${{ inputs.SUSFS_VER }}-${BUILD_DATE}.zip"
+        echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+
+        echo "Cloning AnyKernel3..."
+        git clone --depth=1 \
+          --branch "${{ inputs.ANYKERNEL_BRANCH }}" \
+          "${{ inputs.ANYKERNEL_REPO }}" \
+          AnyKernel3_pkg
+
+        # ── Copy kernel image ──────────────────────────────────────────────────
+        cp "$KERNEL_DIR/out/arch/arm64/boot/${{ inputs.IMAGE_NAME }}" \
+           AnyKernel3_pkg/
+
+        # ── Copy DTBs ─────────────────────────────────────────────────────────
+        # SM8635 DTBs may live under vendor/qcom/ or directly under qcom/
+        DTB_DIRS=(
+          "$KERNEL_DIR/out/arch/arm64/boot/dts/vendor/qcom"
+          "$KERNEL_DIR/out/arch/arm64/boot/dts/qcom"
+        )
+        for DTB_DIR in "${DTB_DIRS[@]}"; do
+          if [ -d "$DTB_DIR" ] && ls "$DTB_DIR"/*.dtb 2>/dev/null | head -1; then
+            mkdir -p AnyKernel3_pkg/dtb
+            cat "$DTB_DIR"/*.dtb > AnyKernel3_pkg/dtb/dtb.img
+            echo "✓ DTBs from $DTB_DIR packaged into dtb/dtb.img"
+            break
+          fi
+        done
+
+        # ── Zip it up ────────────────────────────────────────────────────────
+        cd AnyKernel3_pkg
+        zip -r9 ../"$ZIP_NAME" . \
+          -x ".git/*" \
+          -x "README.md" \
+          -x "*.zip"
+        cd ..
+
+        ls -lh "$ZIP_NAME"
+        echo "✓ Artifact ready: $ZIP_NAME"
+
+    # ── 8. Upload artifact ────────────────────────────────────────────────────
+    - name: "Upload artifact"
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ZIP_NAME }}
+        path: ${{ env.ZIP_NAME }}
+        retention-days: 7
+YAML
+echo "Done"
