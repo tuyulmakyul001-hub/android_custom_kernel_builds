@@ -55,7 +55,18 @@ jobs:
         curl -LSs \
           "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
           | bash -s next
-        echo "KSUNext version: $(cat KernelSU/VERSION 2>/dev/null || echo 'see KernelSU/version')"
+
+        # Verify the driver directory was actually created
+        KSUN_DIR=$(find . -maxdepth 1 -type d -name "KernelSU*" | head -1)
+        if [ -z "${KSUN_DIR}" ]; then
+          echo "::error::KSUNext setup finished but no KernelSU* directory found!"
+          echo "Source root contents:"
+          ls -la .
+          exit 1
+        fi
+        echo "KSUNext directory: ${KSUN_DIR}"
+        # Expose path for the next step
+        echo "KSUN_DIR_NAME=$(basename ${KSUN_DIR})" >> $GITHUB_ENV
 
     - name: Integrate SUSFS
       shell: bash
@@ -63,12 +74,14 @@ jobs:
         SUSFS_BRANCH="gki-android14-6.1"
         KERNEL_DIR="${{ github.workspace }}/source"
         SUSFS_DIR="${{ github.workspace }}/susfs4ksu"
+        # KSUNext directory name discovered in the previous step
+        KSUN_DIR="${KERNEL_DIR}/${{ env.KSUN_DIR_NAME }}"
 
         git clone https://gitlab.com/simonpunk/susfs4ksu.git \
           --depth=1 -b "${SUSFS_BRANCH}" "${SUSFS_DIR}"
 
         # ── 1. Apply main kernel patch ─────────────────────────────────────
-        # Allow partial failure; we handle the known namespace.c mismatch below.
+        # Allow partial failure; namespace.c conflict handled below.
         cd "${KERNEL_DIR}"
         set +e
         patch -p1 --fuzz=3 --ignore-whitespace \
@@ -83,15 +96,11 @@ jobs:
           echo "--- Rejected hunk ---"
           cat "${KERNEL_DIR}/fs/namespace.c.rej"
           echo "---------------------"
-
           if ! grep -q "linux/susfs.h" "${KERNEL_DIR}/fs/namespace.c"; then
-            # Find the last consecutive #include line in the header block (first 80 lines)
             LAST_INC=$(awk '/^#include/{last=NR} NR>80{exit} END{print last}' \
                        "${KERNEL_DIR}/fs/namespace.c")
             sed -i "${LAST_INC}a #include <linux\/susfs.h>" "${KERNEL_DIR}/fs/namespace.c"
-            echo "Inserted #include <linux/susfs.h> after line ${LAST_INC} in fs/namespace.c"
-          else
-            echo "susfs.h already present in namespace.c — skipping"
+            echo "Inserted #include <linux/susfs.h> after line ${LAST_INC}"
           fi
           rm -f "${KERNEL_DIR}/fs/namespace.c.rej"
         fi
@@ -106,7 +115,8 @@ jobs:
         fi
 
         # ── 4. Patch the KSUNext driver to wire up SUSFS ──────────────────
-        cd "${KERNEL_DIR}/KernelSU"
+        echo "Patching KSUNext driver at: ${KSUN_DIR}"
+        cd "${KSUN_DIR}"
         patch -p1 \
           < "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch"
 
