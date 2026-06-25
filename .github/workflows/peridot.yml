@@ -47,34 +47,15 @@ jobs:
         repository: tuyulmakyul001-hub/android_kernel_xiaomi_sm8635
         path: source
         ref: lineage-23.2
-    
+
     - name: Integrate KernelSU Next
       shell: bash
       run: |
-        set -e
         cd ${{ github.workspace }}/source
-
-        # Ensure KernelSU directory exists by cloning the upstream repo explicitly.
-        if [ -d "KernelSU" ]; then
-          echo "KernelSU already exists in source/KernelSU - pulling latest"
-          git -C KernelSU fetch --depth=1 || true
-        else
-          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU || {
-            echo "::error::Failed to clone KernelSU-Next"
-            exit 1
-          }
-        fi
-
-        # If a 'next' branch exists, check it out; otherwise warn and keep default branch.
-        if git -C KernelSU ls-remote --heads origin next | grep -q refs/heads/next; then
-          git -C KernelSU fetch --depth=1 origin next
-          git -C KernelSU checkout -q next
-          echo "Checked out KernelSU branch: next"
-        else
-          echo "::warning::'next' branch not found in KernelSU-Next; using default branch"
-        fi
-
-        echo "KSUNext version: $(cat KernelSU/VERSION 2>/dev/null || echo 'see KernelSU/VERSION')"
+        curl -LSs \
+          "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+          | bash -s next
+        echo "KSUNext version: $(cat KernelSU/VERSION 2>/dev/null || echo 'see KernelSU/version')"
 
     - name: Integrate SUSFS
       shell: bash
@@ -95,6 +76,8 @@ jobs:
         set -e
 
         # ── 2. Fix fs/namespace.c include conflict (Qualcomm OEM kernels) ──
+        # Hunk #1 fails because the OEM include block differs from stock GKI.
+        # SUSFS only needs "#include <linux/susfs.h>" added to that block.
         if [ -f "${KERNEL_DIR}/fs/namespace.c.rej" ]; then
           echo "::warning::namespace.c hunk #1 conflict — injecting include manually"
           echo "--- Rejected hunk ---"
@@ -102,6 +85,7 @@ jobs:
           echo "---------------------"
 
           if ! grep -q "linux/susfs.h" "${KERNEL_DIR}/fs/namespace.c"; then
+            # Find the last consecutive #include line in the header block (first 80 lines)
             LAST_INC=$(awk '/^#include/{last=NR} NR>80{exit} END{print last}' \
                        "${KERNEL_DIR}/fs/namespace.c")
             sed -i "${LAST_INC}a #include <linux\/susfs.h>" "${KERNEL_DIR}/fs/namespace.c"
@@ -121,17 +105,10 @@ jobs:
           exit 1
         fi
 
-         # ── 4. Patch the KernelSU driver to wire up SUSFS ──────────────────
-         if [ ! -d "${KERNEL_DIR}/KernelSU" ]; then
-           echo "::error::KernelSU directory not found at ${KERNEL_DIR}/KernelSU"
-           echo "Directory contents of ${KERNEL_DIR}:"
-           ls -la "${KERNEL_DIR}/"
-           exit 1
-         fi
-         
-         cd "${KERNEL_DIR}/KernelSU"
-         patch -p1 \
-           < "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch"
+        # ── 4. Patch the KSUNext driver to wire up SUSFS ──────────────────
+        cd "${KERNEL_DIR}/KernelSU"
+        patch -p1 \
+          < "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch"
 
         # ── 5. Copy SUSFS source files into the kernel tree ───────────────
         cp "${SUSFS_DIR}/kernel_patches/fs/susfs.c"            "${KERNEL_DIR}/fs/"
