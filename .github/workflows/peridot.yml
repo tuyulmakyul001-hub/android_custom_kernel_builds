@@ -56,16 +56,13 @@ jobs:
           "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
           | bash -s next
 
-        # Verify the driver directory was actually created
         KSUN_DIR=$(find . -maxdepth 1 -type d -name "KernelSU*" | head -1)
         if [ -z "${KSUN_DIR}" ]; then
           echo "::error::KSUNext setup finished but no KernelSU* directory found!"
-          echo "Source root contents:"
           ls -la .
           exit 1
         fi
         echo "KSUNext directory: ${KSUN_DIR}"
-        # Expose path for the next step
         echo "KSUN_DIR_NAME=$(basename ${KSUN_DIR})" >> $GITHUB_ENV
 
     - name: Integrate SUSFS
@@ -74,34 +71,80 @@ jobs:
         SUSFS_BRANCH="gki-android14-6.1"
         KERNEL_DIR="${{ github.workspace }}/source"
         SUSFS_DIR="${{ github.workspace }}/susfs4ksu"
-        # KSUNext directory name discovered in the previous step
         KSUN_DIR="${KERNEL_DIR}/${{ env.KSUN_DIR_NAME }}"
 
         git clone https://gitlab.com/simonpunk/susfs4ksu.git \
           --depth=1 -b "${SUSFS_BRANCH}" "${SUSFS_DIR}"
 
+        echo "=== SUSFS kernel_patches structure ==="
+        find "${SUSFS_DIR}/kernel_patches" -type f | sort
+        echo "======================================"
+
         # ── 1. Apply main kernel patch ─────────────────────────────────────
-        # Allow partial failure; namespace.c conflict handled below.
         cd "${KERNEL_DIR}"
         set +e
         patch -p1 --fuzz=3 --ignore-whitespace \
           < "${SUSFS_DIR}/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch"
         set -e
 
-        # ── 2. Fix fs/namespace.c include conflict (Qualcomm OEM kernels) ──
-        # Hunk #1 fails because the OEM include block differs from stock GKI.
-        # SUSFS only needs "#include <linux/susfs.h>" added to that block.
+        # ── 2. Fix fs/namespace.c (Qualcomm OEM include block differs from GKI)
+        #       The rej needs TWO things injected:
+        #         A) #include <linux/susfs_def.h> guarded by CONFIG_KSU_SUSFS_SUS_MOUNT
+        #         B) extern declarations + CL_COPY_MNT_NS define
         if [ -f "${KERNEL_DIR}/fs/namespace.c.rej" ]; then
-          echo "::warning::namespace.c hunk #1 conflict — injecting include manually"
-          echo "--- Rejected hunk ---"
+          echo "::warning::Fixing namespace.c via Python (rej content below)"
           cat "${KERNEL_DIR}/fs/namespace.c.rej"
-          echo "---------------------"
-          if ! grep -q "linux/susfs.h" "${KERNEL_DIR}/fs/namespace.c"; then
-            LAST_INC=$(awk '/^#include/{last=NR} NR>80{exit} END{print last}' \
-                       "${KERNEL_DIR}/fs/namespace.c")
-            sed -i "${LAST_INC}a #include <linux\/susfs.h>" "${KERNEL_DIR}/fs/namespace.c"
-            echo "Inserted #include <linux/susfs.h> after line ${LAST_INC}"
-          fi
+
+          python3 - "${KERNEL_DIR}/fs/namespace.c" << 'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+
+# Block A — susfs_def.h guarded include
+BLOCK_A = (
+    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+    '#include <linux/susfs_def.h>\n'
+    '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+)
+# Block B — extern declarations (inserted right after #include "internal.h")
+BLOCK_B = (
+    '\n'
+    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+    'extern bool susfs_is_current_ksu_domain(void);\n'
+    'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
+    '\n'
+    '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n'
+    '\n'
+    '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+)
+
+if 'susfs_def.h' not in src:
+    # Prefer anchor right before local includes; works even if OEM added headers
+    if '#include <linux/mnt_idmapping.h>\n' in src:
+        src = src.replace(
+            '#include <linux/mnt_idmapping.h>\n',
+            '#include <linux/mnt_idmapping.h>\n' + BLOCK_A,
+        )
+        print('  [A] Inserted after mnt_idmapping.h')
+    else:
+        # Fallback: insert just before the local pnode.h include
+        src = src.replace('#include "pnode.h"', BLOCK_A + '#include "pnode.h"')
+        print('  [A] Inserted before pnode.h (fallback)')
+else:
+    print('  [A] susfs_def.h already present, skipping')
+
+if 'susfs_is_current_ksu_domain' not in src:
+    src = src.replace('#include "internal.h"\n', '#include "internal.h"\n' + BLOCK_B)
+    print('  [B] Inserted extern block after internal.h')
+else:
+    print('  [B] extern block already present, skipping')
+
+with open(path, 'w') as f:
+    f.write(src)
+print('namespace.c patched OK')
+PYEOF
           rm -f "${KERNEL_DIR}/fs/namespace.c.rej"
         fi
 
@@ -114,15 +157,34 @@ jobs:
           exit 1
         fi
 
-        # ── 4. Patch the KSUNext driver to wire up SUSFS ──────────────────
-        echo "Patching KSUNext driver at: ${KSUN_DIR}"
-        cd "${KSUN_DIR}"
-        patch -p1 \
-          < "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch"
+        # ── 4. Find and apply the SUSFS driver patch for KSUNext ──────────
+        #       Try KernelSU-Next-specific first, fall back to generic KSU patch
+        #       (KSUNext is a fork — the KSU patch applies cleanly in most cases)
+        KSUN_PATCH=""
+        for candidate in \
+            "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch" \
+            "${SUSFS_DIR}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"; do
+          if [ -f "${candidate}" ]; then
+            KSUN_PATCH="${candidate}"
+            break
+          fi
+        done
 
-        # ── 5. Copy SUSFS source files into the kernel tree ───────────────
-        cp "${SUSFS_DIR}/kernel_patches/fs/susfs.c"            "${KERNEL_DIR}/fs/"
-        cp "${SUSFS_DIR}/kernel_patches/include/linux/susfs.h" "${KERNEL_DIR}/include/linux/"
+        if [ -z "${KSUN_PATCH}" ]; then
+          echo "::error::No KSU SUSFS driver patch found. Available patches:"
+          find "${SUSFS_DIR}/kernel_patches" -name "*.patch" | sort
+          exit 1
+        fi
+
+        echo "Applying KSU driver patch: ${KSUN_PATCH}"
+        cd "${KSUN_DIR}"
+        patch -p1 < "${KSUN_PATCH}"
+
+        # ── 5. Copy SUSFS source + all susfs headers into the kernel tree ─
+        cp "${SUSFS_DIR}/kernel_patches/fs/susfs.c" "${KERNEL_DIR}/fs/"
+        # Use glob to catch susfs.h, susfs_def.h, and any future additions
+        cp ${SUSFS_DIR}/kernel_patches/include/linux/susfs*.h \
+           "${KERNEL_DIR}/include/linux/"
 
         echo "SUSFS integration complete (branch: ${SUSFS_BRANCH})"
 
