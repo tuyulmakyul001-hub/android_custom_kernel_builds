@@ -72,7 +72,7 @@ jobs:
     - name: Integrate SUSFS
       shell: bash
       run: |
-        SUSFS_BRANCH="gki-android14-6.1"
+        SUSFS_BRANCH="gki-android16-6.12"
         KERNEL_DIR="${{ github.workspace }}/source"
         SUSFS_DIR="${{ github.workspace }}/susfs4ksu"
 
