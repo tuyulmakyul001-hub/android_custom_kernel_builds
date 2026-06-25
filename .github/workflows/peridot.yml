@@ -47,7 +47,15 @@ jobs:
         repository: tuyulmakyul001-hub/android_kernel_xiaomi_sm8635
         path: source
         ref: lineage-23.2
-
+    
+    - name: Integrate KernelSU Next
+      shell: bash
+      run: |
+        cd ${{ github.workspace }}/source
+        curl -LSs \
+          "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+          | bash -s next
+        echo "KSUNext version: $(cat KernelSU/VERSION 2>/dev/null || echo 'see KernelSU/version')"
     # ─────────────────────────────────────────────────────────────────────────
     # KSUNext — non-invasive integration via official setup script.
     # The script clones the KSUNext driver into source/KernelSU/ and
