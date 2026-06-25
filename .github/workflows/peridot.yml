@@ -56,13 +56,16 @@ jobs:
           "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
           | bash -s next
 
+        # Verify the driver directory was actually created
         KSUN_DIR=$(find . -maxdepth 1 -type d -name "KernelSU*" | head -1)
         if [ -z "${KSUN_DIR}" ]; then
           echo "::error::KSUNext setup finished but no KernelSU* directory found!"
+          echo "Source root contents:"
           ls -la .
           exit 1
         fi
         echo "KSUNext directory: ${KSUN_DIR}"
+        # Expose path for the next step
         echo "KSUN_DIR_NAME=$(basename ${KSUN_DIR})" >> $GITHUB_ENV
 
     - name: Integrate SUSFS
@@ -71,6 +74,7 @@ jobs:
         SUSFS_BRANCH="gki-android14-6.1"
         KERNEL_DIR="${{ github.workspace }}/source"
         SUSFS_DIR="${{ github.workspace }}/susfs4ksu"
+        # KSUNext directory name discovered in the previous step
         KSUN_DIR="${KERNEL_DIR}/${{ env.KSUN_DIR_NAME }}"
 
         git clone https://gitlab.com/simonpunk/susfs4ksu.git \
@@ -81,6 +85,7 @@ jobs:
         echo "======================================"
 
         # ── 1. Apply main kernel patch ─────────────────────────────────────
+        # Allow partial failure; namespace.c conflict handled below.
         cd "${KERNEL_DIR}"
         set +e
         patch -p1 --fuzz=3 --ignore-whitespace \
@@ -95,11 +100,9 @@ jobs:
           echo "::warning::Fixing namespace.c via Python (rej content below)"
           cat "${KERNEL_DIR}/fs/namespace.c.rej"
 
-          python3 - "${KERNEL_DIR}/fs/namespace.c" << 'PYEOF'
-import sys
+          python3 - "${KERNEL_DIR}/fs/namespace.c" << 'PYEOF' import sys
 
-path = sys.argv[1]
-with open(path) as f:
+path = sys.argv[1] with open(path) as f:
     src = f.read()
 
 # Block A — susfs_def.h guarded include
