@@ -109,10 +109,17 @@ jobs:
           exit 1
         fi
 
-        # ── 4. Patch the KSUNext driver to wire up SUSFS ──────────────────
-        cd "${KERNEL_DIR}/KernelSU"
-        patch -p1 \
-          < "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch"
+         # ── 4. Patch the KernelSU driver to wire up SUSFS ──────────────────
+         if [ ! -d "${KERNEL_DIR}/KernelSU" ]; then
+           echo "::error::KernelSU directory not found at ${KERNEL_DIR}/KernelSU"
+           echo "Directory contents of ${KERNEL_DIR}:"
+           ls -la "${KERNEL_DIR}/"
+           exit 1
+         fi
+         
+         cd "${KERNEL_DIR}/KernelSU"
+         patch -p1 \
+           < "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch"
 
         # ── 5. Copy SUSFS source files into the kernel tree ───────────────
         cp "${SUSFS_DIR}/kernel_patches/fs/susfs.c"            "${KERNEL_DIR}/fs/"
