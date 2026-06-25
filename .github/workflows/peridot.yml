@@ -48,6 +48,52 @@ jobs:
         path: source
         ref: lineage-23.2
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # KSUNext — non-invasive integration via official setup script.
+    # The script clones the KSUNext driver into source/KernelSU/ and
+    # registers it with the Makefile/Kconfig automatically.
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Integrate KernelSU Next
+      shell: bash
+      run: |
+        cd ${{ github.workspace }}/source
+        curl -LSs \
+          "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+          | bash -s next
+        echo "KSUNext version: $(cat KernelSU/VERSION 2>/dev/null || echo 'see KernelSU/version')"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SUSFS — clones susfs4ksu, applies three patches, and copies source files.
+    #
+    # SUSFS_BRANCH: "gki-android14-6.1" for Android 14 targets,
+    #               "gki-android15-6.1" for Android 15 targets.
+    # Change the variable below to match what your ROM targets.
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Integrate SUSFS
+      shell: bash
+      run: |
+        SUSFS_BRANCH="gki-android14-6.1"
+        KERNEL_DIR="${{ github.workspace }}/source"
+        SUSFS_DIR="${{ github.workspace }}/susfs4ksu"
+
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git \
+          --depth=1 -b "${SUSFS_BRANCH}" "${SUSFS_DIR}"
+
+        # 1. Patch the kernel fs layer
+        #    Adds susfs hooks, updates fs/Makefile and fs/Kconfig
+        cd "${KERNEL_DIR}"
+        patch -p1 < "${SUSFS_DIR}/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch"
+
+        # 2. Patch the KSUNext driver to wire up SUSFS support
+        cd "${KERNEL_DIR}/KernelSU"
+        patch -p1 < "${SUSFS_DIR}/kernel_patches/KernelSU-Next/10_enable_susfs_for_ksu-next.patch"
+
+        # 3. Copy SUSFS source files into the kernel tree
+        cp "${SUSFS_DIR}/kernel_patches/fs/susfs.c"            "${KERNEL_DIR}/fs/"
+        cp "${SUSFS_DIR}/kernel_patches/include/linux/susfs.h" "${KERNEL_DIR}/include/linux/"
+
+        echo "SUSFS integration complete (branch: ${SUSFS_BRANCH})"
+
     - name: Build Kernel in Docker (ArchLinux)
       uses: ./builder/actions/peridot
       
