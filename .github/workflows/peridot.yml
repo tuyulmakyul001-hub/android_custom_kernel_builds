@@ -54,7 +54,7 @@ jobs:
         cd ${{ github.workspace }}/source
         curl -LSs \
           "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-          | bash -s dev
+          | bash -
 
         # Verify the driver directory was actually created
         KSUN_DIR=$(find . -maxdepth 1 -type d -name "KernelSU*" | head -1)
