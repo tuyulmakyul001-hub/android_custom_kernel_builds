@@ -117,8 +117,8 @@ jobs:
         # ── 4. Patch the KSUNext driver to wire up SUSFS ──────────────────
         echo "Patching KSUNext driver at: ${KSUN_DIR}"
         cd "${KSUN_DIR}"
-        patch -p1 \
-          < "${SUSFS_DIR}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+        patch -p1 --fuzz=3 \
+        < "${SUSFS_DIR}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
         # ── 5. Copy SUSFS source files into the kernel tree ───────────────
         cp "${SUSFS_DIR}/kernel_patches/fs/susfs.c"            "${KERNEL_DIR}/fs/"
